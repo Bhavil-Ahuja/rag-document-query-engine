@@ -18,3 +18,8 @@ data/evaluation_logs/*.json
 
 # PDFs (personal documents)
 data/documents/*
+
+# Keep .gitkeep files
+!data/cache/.gitkeep
+!data/vector_store/.gitkeep
+!data/evaluation_logs/.gitkeep

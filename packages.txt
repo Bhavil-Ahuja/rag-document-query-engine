@@ -1,0 +1,7 @@
+# System packages needed for deployment
+# Uncomment if you need specific system libraries
+
+# For PDF processing
+# poppler-utils
+# tesseract-ocr
+
