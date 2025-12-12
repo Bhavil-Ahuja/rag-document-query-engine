@@ -2,7 +2,7 @@
 Main entry point for the RAG pipeline.
 """
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from src.rag.config import get_default_config, RAGConfig
 from src.ingestion.document_processor import DocumentProcessor
@@ -199,6 +199,70 @@ class RAGSystem:
         """Save evaluation log."""
         if self.evaluator:
             self.evaluator.save_session_log()
+    
+    def delete_document(self, filename: str, collection_path: Path) -> dict:
+        """
+        Delete a document from both filesystem and vector store.
+        
+        Args:
+            filename: Name of the PDF file to delete
+            collection_path: Path to the collection folder
+            
+        Returns:
+            Dictionary with deletion results
+        """
+        try:
+            result = {
+                'success': False,
+                'file_deleted': False,
+                'chunks_deleted': 0,
+                'message': ''
+            }
+            
+            # Delete from filesystem
+            file_path = collection_path / filename
+            if file_path.exists():
+                file_path.unlink()
+                result['file_deleted'] = True
+                logger.info(f"Deleted file: {filename}")
+            else:
+                logger.warning(f"File not found: {filename}")
+            
+            # Delete from vector store (all chunks with this source)
+            chunks_deleted = self.pipeline.vector_store.delete_by_source(filename)
+            result['chunks_deleted'] = chunks_deleted
+            
+            # Rebuild BM25 index if using hybrid search
+            if self.config.retrieval.use_hybrid_search:
+                self._build_bm25_index_from_existing()
+            
+            result['success'] = True
+            result['message'] = f"Deleted {filename}: {chunks_deleted} chunks removed"
+            
+            logger.info(f"Successfully deleted document: {filename}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error deleting document {filename}: {e}")
+            return {
+                'success': False,
+                'file_deleted': False,
+                'chunks_deleted': 0,
+                'message': f"Error: {str(e)}"
+            }
+    
+    def list_documents(self) -> List[Dict[str, Any]]:
+        """
+        List all documents in the vector store.
+        
+        Returns:
+            List of document sources with their chunk counts
+        """
+        try:
+            return self.pipeline.vector_store.list_sources()
+        except Exception as e:
+            logger.error(f"Error listing documents: {e}")
+            return []
 
 
 def interactive_mode():

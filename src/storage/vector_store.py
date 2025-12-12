@@ -249,3 +249,130 @@ class VectorStore:
             return len(result['ids']) > 0
         except:
             return False
+    
+    def delete_by_source(self, source_filename: str) -> int:
+        """
+        Delete all document chunks from a specific source file.
+        
+        Args:
+            source_filename: Name of the source file (e.g., 'document.pdf')
+            
+        Returns:
+            Number of chunks deleted
+        """
+        try:
+            logger.info(f"Attempting to delete chunks for: {source_filename}")
+            logger.info(f"Collection: {self.config.collection_name}, Total chunks: {self.collection.count()}")
+            
+            # First, get a sample to see what keys are being used
+            sample = self.collection.get(limit=1, include=['metadatas'])
+            if sample['metadatas']:
+                logger.info(f"Sample metadata keys: {list(sample['metadatas'][0].keys())}")
+            
+            # Try different metadata key variations
+            chunk_ids = []
+            
+            # Try 1: source_file
+            try:
+                results = self.collection.get(
+                    where={"source_file": source_filename},
+                    include=['metadatas']
+                )
+                if results['ids']:
+                    chunk_ids = results['ids']
+                    logger.info(f"Found {len(chunk_ids)} chunks using 'source_file' key")
+            except Exception as e:
+                logger.warning(f"Query with 'source_file' failed: {e}")
+            
+            # Try 2: source (if not found yet)
+            if not chunk_ids:
+                try:
+                    results = self.collection.get(
+                        where={"source": source_filename},
+                        include=['metadatas']
+                    )
+                    if results['ids']:
+                        chunk_ids = results['ids']
+                        logger.info(f"Found {len(chunk_ids)} chunks using 'source' key")
+                except Exception as e:
+                    logger.warning(f"Query with 'source' failed: {e}")
+            
+            # Try 3: file_path contains filename (fallback)
+            if not chunk_ids:
+                try:
+                    # Get all and filter manually
+                    all_results = self.collection.get(include=['metadatas'])
+                    for i, metadata in enumerate(all_results['metadatas']):
+                        # Check all metadata values for the filename
+                        for key, value in metadata.items():
+                            if isinstance(value, str) and source_filename in value:
+                                chunk_ids.append(all_results['ids'][i])
+                                break
+                    
+                    if chunk_ids:
+                        logger.info(f"Found {len(chunk_ids)} chunks by searching metadata values")
+                except Exception as e:
+                    logger.warning(f"Manual search failed: {e}")
+            
+            if not chunk_ids:
+                logger.error(f"No chunks found for: {source_filename}")
+                logger.error("Listing all unique sources in collection:")
+                
+                # Show what sources exist
+                all_results = self.collection.get(include=['metadatas'])
+                sources = set()
+                for metadata in all_results['metadatas']:
+                    for key in ['source_file', 'source', 'file_path']:
+                        if key in metadata:
+                            sources.add(f"{key}={metadata[key]}")
+                
+                for source in sorted(sources):
+                    logger.error(f"  - {source}")
+                
+                return 0
+            
+            # Delete the documents
+            self.collection.delete(ids=chunk_ids)
+            
+            logger.info(f"Successfully deleted {len(chunk_ids)} chunks from: {source_filename}")
+            return len(chunk_ids)
+            
+        except Exception as e:
+            logger.error(f"Error deleting by source {source_filename}: {e}")
+            raise
+    
+    def list_sources(self) -> List[Dict[str, Any]]:
+        """
+        List all unique source documents in the collection with their chunk counts.
+        
+        Returns:
+            List of dictionaries with source info
+        """
+        try:
+            # Get all documents with metadata
+            results = self.collection.get(include=['metadatas'])
+            
+            if not results['metadatas']:
+                return []
+            
+            # Count chunks by source (try both 'source_file' and 'source' keys)
+            source_counts = {}
+            for metadata in results['metadatas']:
+                # Try source_file first (newer format), fallback to source
+                source = metadata.get('source_file') or metadata.get('source', 'unknown')
+                if source in source_counts:
+                    source_counts[source] += 1
+                else:
+                    source_counts[source] = 1
+            
+            # Format as list
+            sources = [
+                {'source': source, 'chunks': count}
+                for source, count in sorted(source_counts.items())
+            ]
+            
+            return sources
+            
+        except Exception as e:
+            logger.error(f"Error listing sources: {e}")
+            return []

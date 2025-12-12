@@ -99,6 +99,13 @@ st.markdown("""
         text-align: center;
         color: #000000;
     }
+    /* Fix cursor for selectbox and interactive elements */
+    .stSelectbox > div > div {
+        cursor: default !important;
+    }
+    .stSelectbox label {
+        cursor: default !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -437,7 +444,7 @@ def main():
     """Main application."""
     
     # Header
-    st.markdown('<h1 class="main-header">📚 RAG Document Assistant (Advanced)</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📚 RAG Document Assistant</h1>', unsafe_allow_html=True)
     st.markdown("---")
     
     # Initialize session state
@@ -850,8 +857,64 @@ def show_documents_view():
         
         # List all documents
         for i, doc_name in enumerate(metadata['files']):
-            if st.button(f"📄 {doc_name}", key=f"doc_{i}", use_container_width=True):
-                st.session_state.selected_pdf = doc_name
+            # Create row with view button and delete button
+            doc_col1, doc_col2 = st.columns([4, 1])
+            
+            with doc_col1:
+                if st.button(f"📄 {doc_name}", key=f"doc_{i}", use_container_width=True):
+                    st.session_state.selected_pdf = doc_name
+            
+            with doc_col2:
+                if st.button("🗑️", key=f"delete_{i}", help=f"Delete {doc_name}"):
+                    # Confirm deletion
+                    if 'confirm_delete' not in st.session_state:
+                        st.session_state.confirm_delete = doc_name
+                        st.rerun()
+        
+        # Show confirmation dialog if needed
+        if 'confirm_delete' in st.session_state:
+            doc_to_delete = st.session_state.confirm_delete
+            
+            st.warning(f"⚠️ Are you sure you want to delete **{doc_to_delete}**?")
+            st.caption("This will remove the file and all its chunks from the vector store.")
+            
+            col_yes, col_no = st.columns(2)
+            
+            with col_yes:
+                if st.button("✅ Yes, Delete", key="confirm_yes", type="primary", use_container_width=True):
+                    # Perform deletion
+                    try:
+                        rag_system = get_rag_system(collection)
+                        collection_path = Path(f"./data/documents/{collection}")
+                        
+                        result = rag_system.delete_document(doc_to_delete, collection_path)
+                        
+                        if result['success']:
+                            st.success(f"✅ {result['message']}")
+                            
+                            # Clear selection if viewing deleted doc
+                            if st.session_state.selected_pdf == doc_to_delete:
+                                st.session_state.selected_pdf = None
+                            
+                            # Clear confirmation state
+                            del st.session_state.confirm_delete
+                            
+                            # Force cache clear and rerun
+                            get_rag_system.clear()
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {result['message']}")
+                            del st.session_state.confirm_delete
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error deleting document: {e}")
+                        del st.session_state.confirm_delete
+            
+            with col_no:
+                if st.button("❌ Cancel", key="confirm_no", use_container_width=True):
+                    del st.session_state.confirm_delete
+                    st.rerun()
     
     with col2:
         if st.session_state.selected_pdf:
