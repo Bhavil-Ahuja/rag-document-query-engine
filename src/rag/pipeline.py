@@ -100,7 +100,8 @@ class RAGPipeline:
         top_k: Optional[int] = None,
         min_score: Optional[float] = None,
         return_sources: bool = True,
-        return_context: bool = False
+        return_context: bool = False,
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
         Query the RAG system with hallucination prevention.
@@ -111,6 +112,7 @@ class RAGPipeline:
             min_score: Minimum similarity score
             return_sources: Whether to return source citations
             return_context: Whether to return retrieved context
+            conversation_history: List of previous messages [{'role': 'user'/'assistant', 'content': '...'}, ...]
             
         Returns:
             Dictionary with answer and metadata
@@ -119,12 +121,22 @@ class RAGPipeline:
         
         logger.info(f"Processing query: {question}")
         
-        # Check cache
-        if self.cache is not None:
+        # Expand query with conversation context if needed for better retrieval
+        expanded_query = self._expand_query_with_context(question, conversation_history)
+        if expanded_query != question:
+            logger.info(f"Query expanded: '{question}' → '{expanded_query}'")
+        
+        # Check cache (skip if conversation history present - context changes answers)
+        use_cache = self.cache is not None and (conversation_history is None or len(conversation_history) == 0)
+        cache_key = None
+        
+        if use_cache:
             cache_key = compute_query_hash(question, {'top_k': top_k, 'min_score': min_score})
             if cache_key in self.cache:
                 logger.info("Cache hit!")
                 return self.cache[cache_key]
+        elif self.cache is not None and conversation_history:
+            logger.info("Cache disabled for conversational query")
         
         # Optimize query if enabled
         doc_hints = None
@@ -132,7 +144,7 @@ class RAGPipeline:
         
         if self.query_optimizer:
             optimization = self.query_optimizer.optimize_query(
-                question,
+                expanded_query,  # Use expanded query for better retrieval
                 use_hyde=self.config.use_hyde,
                 use_stepback=self.config.use_stepback,
                 use_query2doc=self.config.use_query2doc,
@@ -160,8 +172,8 @@ class RAGPipeline:
                 }
                 logger.info(f"Temporal query augmented to: '{temporal_query}'")
             
-            # Extract document references from query
-            doc_hints = self.query_optimizer.extract_document_reference(question)
+            # Extract document references from expanded query
+            doc_hints = self.query_optimizer.extract_document_reference(expanded_query)
             
             # Get routing parameters
             route_params = self.query_router.route(query_type)
@@ -294,8 +306,8 @@ class RAGPipeline:
         
         context = "\n\n---\n\n".join(context_parts)
         
-        # Generate answer with hallucination prevention
-        answer = self._generate_answer(question, context, results)
+        # Generate answer with conversation history
+        answer = self._generate_answer(question, context, results, conversation_history)
         
         # Prepare response
         response = {
@@ -312,8 +324,8 @@ class RAGPipeline:
         # Add to history
         self._add_to_history(question, response)
         
-        # Cache result
-        if self.cache is not None:
+        # Cache result (only if cache was enabled for this query)
+        if use_cache and cache_key is not None:
             self.cache[cache_key] = response
         
         logger.info(f"Query completed in {response['query_time']:.2f}s")
@@ -419,15 +431,17 @@ class RAGPipeline:
         self, 
         question: str, 
         context: str, 
-        sources: List[Dict[str, Any]]
+        sources: List[Dict[str, Any]],
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """
-        Generate answer with hallucination prevention.
+        Generate answer with hallucination prevention and conversation context.
         
         Args:
             question: User question
             context: Retrieved context
             sources: Source documents
+            conversation_history: Previous conversation messages
             
         Returns:
             Generated answer
@@ -439,6 +453,20 @@ class RAGPipeline:
         # Build explicit list of available sources
         source_list = "\n".join([f"- {filename}" for filename in sorted(source_files)])
         
+        # Build conversation history section
+        history_section = ""
+        if conversation_history and len(conversation_history) > 0:
+            history_lines = []
+            for msg in conversation_history:
+                role = "User" if msg['role'] == 'user' else "Assistant"
+                history_lines.append(f"{role}: {msg['content']}")
+            history_section = f"""
+📜 PREVIOUS CONVERSATION (for context only):
+{chr(10).join(history_lines)}
+
+---
+"""
+        
         # Build prompt with strict grounding instructions
         multi_doc_instruction = ""
         if is_multi_doc:
@@ -449,6 +477,7 @@ When answering, you MUST specify which document each piece of information comes 
 """
         
         prompt = f"""You are a precise and accurate assistant. Answer questions based STRICTLY on the provided context.
+{history_section if history_section else ""}
 
 📋 AVAILABLE SOURCES (These are the ONLY documents you can reference):
 {source_list}
@@ -569,6 +598,70 @@ ANSWER (carefully match each fact to its correct source document):"""
                 'content': src['content']  # Include full content
             })
         return formatted
+    
+    def _expand_query_with_context(
+        self,
+        question: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> str:
+        """
+        Expand a follow-up question using conversation context for better retrieval.
+        
+        Args:
+            question: Current question (might be incomplete, e.g., "CGPA?")
+            conversation_history: Previous conversation messages
+            
+        Returns:
+            Expanded standalone question (e.g., "What is Bhavil's B.TECH CGPA?")
+        """
+        # If no history or question is already detailed, return as-is
+        if not conversation_history or len(conversation_history) == 0:
+            return question
+        
+        # If question is already long/detailed (>50 chars), probably standalone
+        if len(question) > 50:
+            return question
+        
+        # Check if question looks like a follow-up (short, vague, pronouns)
+        follow_up_indicators = ['it', 'that', 'this', 'he', 'she', 'they', 'there', 'when', 'what', 'how', '?']
+        is_likely_followup = (
+            len(question.split()) <= 5 or  # Short question
+            any(word.lower() in question.lower() for word in ['it', 'that', 'this'])
+        )
+        
+        if not is_likely_followup:
+            return question
+        
+        try:
+            # Build context from last 2-3 exchanges
+            recent_history = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+            history_text = "\n".join([
+                f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content'][:200]}"
+                for msg in recent_history
+            ])
+            
+            # Ask LLM to rewrite the question as standalone
+            prompt = f"""Given this conversation history, rewrite the follow-up question as a complete, standalone question that includes all necessary context for document retrieval.
+
+CONVERSATION HISTORY:
+{history_text}
+
+FOLLOW-UP QUESTION: {question}
+
+STANDALONE QUESTION (include key entities/context from history):"""
+            
+            response = self.llm.invoke([prompt])
+            expanded = response.content.strip()
+            
+            # Validate expansion (should be longer and contain key terms)
+            if len(expanded) > len(question) and len(expanded) < 200:
+                return expanded
+            else:
+                return question
+                
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}")
+            return question
     
     def _add_to_history(self, question: str, response: Dict[str, Any]):
         """

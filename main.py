@@ -138,7 +138,8 @@ class RAGSystem:
         question: str,
         top_k: Optional[int] = None,
         min_score: Optional[float] = None,
-        evaluate: bool = False
+        evaluate: bool = False,
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> dict:
         """
         Query the RAG system.
@@ -148,17 +149,19 @@ class RAGSystem:
             top_k: Number of documents to retrieve
             min_score: Minimum similarity score
             evaluate: Whether to evaluate response
+            conversation_history: Previous conversation messages (last 5 Q&A pairs recommended)
             
         Returns:
             Response dictionary
         """
-        # Get response from pipeline
+        # Get response from pipeline with conversation history
         response = self.pipeline.query(
             question,
             top_k=top_k,
             min_score=min_score,
             return_sources=True,
-            return_context=evaluate  # Only get context if evaluating
+            return_context=evaluate,  # Only get context if evaluating
+            conversation_history=conversation_history
         )
         
         # Evaluate if requested

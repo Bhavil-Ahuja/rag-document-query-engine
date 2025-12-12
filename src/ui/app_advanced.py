@@ -730,10 +730,24 @@ def main():
 
 def show_chat_view():
     """Show chat interface."""
-    st.markdown("### 💬 Chat with Your Documents")
+    # Header with clear button
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.markdown("### 💬 Chat with Your Documents")
+    with col2:
+        collection = st.session_state.current_collection
+        if collection in st.session_state.chat_history and len(st.session_state.chat_history[collection]) > 0:
+            if st.button("🗑️ Clear Chat", help="Clear conversation history and cache", use_container_width=True):
+                st.session_state.chat_history[collection] = []
+                # Clear cache to avoid returning stale answers with different context
+                try:
+                    rag_system = get_rag_system(collection)
+                    rag_system.clear_cache()
+                except:
+                    pass
+                st.rerun()
     
     # Get or create chat history for current collection
-    collection = st.session_state.current_collection
     if collection not in st.session_state.chat_history:
         st.session_state.chat_history[collection] = []
     
@@ -808,7 +822,16 @@ def show_chat_view():
             with st.spinner("🔍 Searching documents..."):
                 try:
                     rag_system = get_rag_system(collection)
-                    response = rag_system.query(user_question, evaluate=True)
+                    
+                    # Get last 5 Q&A pairs (10 messages) for conversation context
+                    # This helps with follow-up questions like "What about the other one?"
+                    conversation_context = st.session_state.chat_history[collection][-10:] if len(st.session_state.chat_history[collection]) > 0 else None
+                    
+                    response = rag_system.query(
+                        user_question, 
+                        evaluate=True,
+                        conversation_history=conversation_context
+                    )
                     
                     # Add assistant message
                     st.session_state.chat_history[collection].append({
